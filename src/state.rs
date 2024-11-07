@@ -73,4 +73,13 @@ impl SharedState {
 
         self.frames.extend(purged_frames.iter());
     }
+
+    // true if all frames are successfully generated
+    // false if any frame is pending
+    pub fn has_frames(&self) -> bool {
+        let has_no_pending = self.pending_tasks.values()
+            .all(|task| task.frames.is_empty());
+
+        !(self.frames.is_empty() && has_no_pending)
+    }
 }

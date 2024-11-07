@@ -171,6 +171,8 @@ async fn main() -> std::io::Result<()> {
     std::fs::create_dir_all(&output_directory)
         .expect("Failed to create output directory");
 
+    let script = parse_env!("COMMAND", String).unwrap_or("./run.sh".to_string());
+
     let source_file = {
         let file_path = parse_env!("SOURCE_FILE", String)
             .unwrap_or("shamyna.blend".to_string());
@@ -178,7 +180,7 @@ async fn main() -> std::io::Result<()> {
         std::fs::read(file_path).expect("Failed to load source file")
     };
 
-    let frames_count = parse_env!("FRAMES_COUNT", u64).unwrap_or(128);
+    let frames_count = parse_env!("FRAMES_COUNT", u64).unwrap_or(1);
 
     assert!(frames_count > 0);
 
@@ -186,7 +188,7 @@ async fn main() -> std::io::Result<()> {
 
     let state_lock = Arc::new(RwLock::new(SharedState {
         source_file: Arc::new(source_file),
-        output_directory,
+        output_directory: output_directory.clone(),
         frames,
         pending_tasks: HashMap::new(),
         next_worker_id: 1,
@@ -201,6 +203,32 @@ async fn main() -> std::io::Result<()> {
 
             state.clean_up();
 
+            let has_frames = state.has_frames();
+
+            drop(state);
+
+            if !has_frames {
+                tokio::task::spawn_blocking(move || {
+                    let mut child = std::process::Command::new(script)
+                        .arg(output_directory)
+                        .spawn()
+                        .expect("Failed to run build script");
+
+                    let exit_status = child.wait();
+
+                    match exit_status {
+                        Ok(code) => {
+                            log::info!("Build script exit with code: {code}");
+                        }
+                        Err(cause) => {
+                            log::warn!("Build script failed: {cause}");
+                        }
+                    }
+                });
+
+                log::info!("Master node is dying...");
+                break;
+            }
         }
     });
 
