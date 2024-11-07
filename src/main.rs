@@ -1,4 +1,6 @@
 pub mod env;
+pub mod state;
+pub mod task;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -10,8 +12,12 @@ use actix_multipart::form::{tempfile::TempFile, MultipartForm};
 use actix_web::{
     get,
     http::{header::HeaderName, StatusCode},
-    post, put, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    post, put,
+    web::Query,
+    App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
+use state::SharedState;
+use task::WorkerTask;
 
 #[derive(MultipartForm)]
 struct Frame {
@@ -26,66 +32,29 @@ const HEADER_WORKER_ID: HeaderName = HeaderName::from_static("x-worker-id");
 
 pub type StateLock = Arc<RwLock<SharedState>>;
 
-#[derive(Debug, Clone)]
-pub struct SharedState {
-    pub source_file: Arc<Vec<u8>>,
-    pub frames: HashSet<FrameId>,
-    pub next_worker_id: u64,
-    pub pending_tasks: HashMap<WorkerId, WorkerTask>,
-    pub output_directory: String,
+#[derive(serde::Deserialize)]
+pub struct TaskQuery {
+    pub count: Option<u32>,
 }
 
-pub enum WorkerStateError {
-    NotFound,
-    Retired,
-}
+#[get("/")]
+async fn index() -> impl Responder {
+    let html = r#"<html>
+        <head><title>Upload Frame</title></head>
+        <body>
+            <form target="/tasks" method="put" enctype="multipart/form-data">
+                <input type="file" multiple name="file"/>
+                <button type="submit">Submit</button>
+            </form>
+        </body>
+    </html>"#;
 
-impl SharedState {
-    pub fn take_frame_id(&mut self) -> Option<FrameId> {
-        let frame_id = self.frames.iter().next().cloned()?;
-        let _ = self.frames.remove(&frame_id);
-        Some(frame_id)
-    }
-
-    pub fn create_worker(&mut self) -> WorkerId {
-        let worker_id = self.next_worker_id.to_string();
-        self.next_worker_id += 1;
-        worker_id
-    }
-
-    pub fn add_task(
-        &mut self,
-        frame_id: FrameId,
-        worker_id: WorkerId,
-    ) -> WorkerTask {
-        let worker_task = WorkerTask::new(worker_id.clone(), frame_id);
-
-        self.pending_tasks.insert(worker_id, worker_task.clone());
-
-        worker_task
-    }
-}
-
-#[derive(serde::Serialize, Debug, Clone)]
-pub struct WorkerTask {
-    pub worker_id: WorkerId,
-    pub frame_id: FrameId,
-    pub lease_time: SystemTime,
-}
-
-impl WorkerTask {
-    pub fn new(worker_id: WorkerId, frame_id: FrameId) -> Self {
-        Self {
-            worker_id,
-            frame_id,
-            lease_time: SystemTime::now(),
-        }
-    }
+    HttpResponse::Ok().body(html)
 }
 
 #[get("/frames")]
 async fn get_frames(req: HttpRequest) -> impl Responder {
-    let state_lock = req.app_data::<RwLock<SharedState>>().unwrap();
+    let state_lock = req.app_data::<StateLock>().unwrap();
 
     let file = {
         let state = state_lock.read().unwrap();
@@ -97,22 +66,34 @@ async fn get_frames(req: HttpRequest) -> impl Responder {
 }
 
 #[post("/tasks")]
-async fn get_next_task(req: HttpRequest) -> impl Responder {
+async fn get_next_tasks(
+    req: HttpRequest,
+    query: Query<TaskQuery>,
+) -> impl Responder {
     let state_lock = req.app_data::<StateLock>().unwrap();
 
     let mut state = state_lock.write().unwrap();
 
-    let Some(frame_id) = state.take_frame_id() else {
+    let task_count = query.count.unwrap_or(1);
+    let frame_ids = (0..task_count)
+        .flat_map(|_| state.take_frame_id())
+        .collect::<Vec<FrameId>>();
+
+    if frame_ids.is_empty() {
+        //no task can be generated because all are already taken
         return HttpResponse::new(StatusCode::CONFLICT);
-    };
+    }
 
     let worker_id = state.create_worker();
 
-    let task = state.add_task(frame_id, worker_id);
+    let tasks = frame_ids
+        .into_iter()
+        .map(|frame_id| state.add_task(frame_id, worker_id.clone()))
+        .collect::<Vec<WorkerTask>>();
 
     drop(state);
 
-    HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
+    HttpResponse::Ok().body(serde_json::to_string(&tasks).unwrap())
 }
 
 #[put("/tasks")]
@@ -135,11 +116,11 @@ async fn submit_pending_task(
     };
 
     let file_name =
-        format!("./{}/{}", state.output_directory, worker_task.frame_id);
+        format!("{}/{}", state.output_directory, worker_task.frame_id);
 
     drop(state);
 
-    match form.frame.file.persist(file_name) {
+    match form.frame.file. persist(file_name) {
         Ok(_) => {
             let mut state = state_lock.write().unwrap();
             if let Some(frame_id) = state.take_frame_id() {
@@ -169,6 +150,7 @@ async fn submit_heartbeat(req: HttpRequest) -> impl Responder {
     let state_lock = req.app_data::<StateLock>().unwrap();
 
     let mut state = state_lock.write().unwrap();
+
     let Some(worker_task) = state.pending_tasks.get_mut(worker_id) else {
         return HttpResponse::new(StatusCode::NOT_FOUND);
     };
@@ -180,11 +162,16 @@ async fn submit_heartbeat(req: HttpRequest) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::builder().init();
+
     let output_directory =
-        parse_env!("OUT_DIRECTORY", String).unwrap_or("frames".to_string());
+        parse_env!("OUT_DIRECTORY", String).unwrap_or("/tmp/frames".to_string());
+
+    std::fs::create_dir_all(&output_directory)
+        .expect("Failed to create output directory");
 
     let source_file = {
-        let file_path = parse_env!("SRC_FILE", String)
+        let file_path = parse_env!("SOURCE_FILE", String)
             .unwrap_or("shamyna.blend".to_string());
 
         std::fs::read(file_path).expect("Failed to load source file")
@@ -219,9 +206,11 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .service(get_next_task)
-            .service(submit_heartbeat)
+            .service(index)
+            .service(get_frames)
+            .service(get_next_tasks)
             .service(submit_pending_task)
+            .service(submit_heartbeat)
             .app_data(Arc::clone(&state_lock))
     })
     .bind(("0.0.0.0", 8080))?
