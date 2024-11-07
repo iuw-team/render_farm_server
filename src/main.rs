@@ -41,21 +41,6 @@ pub struct FrameQuery {
     pub frame_id: Option<FrameId>,
 }
 
-#[get("/")]
-async fn index() -> impl Responder {
-    let html = r#"<html>
-        <head><title>Upload Frame</title></head>
-        <body>
-            <form target="/tasks" method="put" enctype="multipart/form-data">
-                <input type="file" multiple name="file"/>
-                <button type="submit">Submit</button>
-            </form>
-        </body>
-    </html>"#;
-
-    HttpResponse::Ok().body(html)
-}
-
 #[get("/frames")]
 async fn get_frames(req: HttpRequest) -> impl Responder {
     let state_lock = req.app_data::<StateLock>().unwrap();
@@ -180,6 +165,9 @@ async fn main() -> std::io::Result<()> {
     let output_directory = parse_env!("OUT_DIRECTORY", String)
         .unwrap_or("/tmp/frames".to_string());
 
+    std::fs::remove_dir_all(&output_directory)
+        .expect("Failed to clear output directory");
+
     std::fs::create_dir_all(&output_directory)
         .expect("Failed to create output directory");
 
@@ -219,7 +207,6 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .service(index)
             .service(get_frames)
             .service(get_next_tasks)
             .service(submit_pending_task)
