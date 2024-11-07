@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::Arc, time::SystemTime,
 };
 
 use crate::{task::WorkerTask, FrameId, WorkerId, LEASE_TIME};
@@ -55,5 +55,22 @@ impl SharedState {
         } else {
             None
         }
+    }
+
+    //perform clean up old workers
+    pub fn clean_up(&mut self) {
+        let mut purged_frames = Vec::<FrameId>::new();
+
+        self.pending_tasks.retain(|_id, state| {
+            let is_alive = state.lease_time < SystemTime::now();
+
+            if !is_alive {
+                purged_frames.extend(state.frames.iter());
+            }
+
+            is_alive
+        });
+
+        self.frames.extend(purged_frames.iter());
     }
 }

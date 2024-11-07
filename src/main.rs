@@ -199,9 +199,8 @@ async fn main() -> std::io::Result<()> {
 
             let mut state = state_lock_ref.write().unwrap();
 
-            state
-                .pending_tasks
-                .retain(|_id, state| state.lease_time < SystemTime::now());
+            state.clean_up();
+
         }
     });
 
