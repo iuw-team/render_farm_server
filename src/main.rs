@@ -120,7 +120,7 @@ async fn submit_pending_task(
         return HttpResponse::new(StatusCode::NOT_FOUND);
     }
 
-    let file_name = format!("{}/{}", state.output_directory, frame_id);
+    let file_name = format!("{}/{}.png", state.output_directory, frame_id);
 
     drop(state);
 

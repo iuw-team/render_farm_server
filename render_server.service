@@ -3,8 +3,8 @@ Description=Blender Render Farm server
 After=network.target
 
 [Service]
-WorkingDirectory=/home/au/render_farm
-ExecStart=/home/au/render_farm/blender_server
+WorkingDirectory=/home/artyom/render
+ExecStart=/home/artyom/render/blender_server
 Environment=RUST_LOG=info
 Environment=FRAMES_COUNT=12
 Environment=COMMAND=./run.sh
