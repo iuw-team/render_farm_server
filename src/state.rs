@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{task::WorkerTask, FrameId, WorkerId};
+use crate::{task::WorkerTask, FrameId, WorkerId, LEASE_TIME};
 
 #[derive(Debug, Clone)]
 pub struct SharedState {
@@ -29,13 +29,31 @@ impl SharedState {
 
     pub fn add_task(
         &mut self,
-        frame_id: FrameId,
         worker_id: WorkerId,
+        frame_ids: &[FrameId],
     ) -> WorkerTask {
-        let worker_task = WorkerTask::new(worker_id.clone(), frame_id);
+        self.pending_tasks
+            .entry(worker_id.clone())
+            .and_modify(|task| {
+                for id in frame_ids {
+                    let was_inserted = task.frames.insert(*id);
+                    assert!(was_inserted);
+                }
 
-        self.pending_tasks.insert(worker_id, worker_task.clone());
+                task.lease_time += LEASE_TIME;
+            })
+            .or_insert(WorkerTask::new(worker_id.clone(), frame_ids));
 
-        worker_task
+        WorkerTask::new(worker_id.clone(), frame_ids)
+    }
+
+    pub fn get_pending_frame_id(&self, worker_id: WorkerId) -> Option<FrameId> {
+        let task = self.pending_tasks.get(&worker_id)?;
+
+        if task.frames.len() == 1 {
+            task.frames.iter().next().cloned()
+        } else {
+            None
+        }
     }
 }

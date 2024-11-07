@@ -17,7 +17,6 @@ use actix_web::{
     App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
 use state::SharedState;
-use task::WorkerTask;
 
 #[derive(MultipartForm)]
 struct Frame {
@@ -35,6 +34,11 @@ pub type StateLock = Arc<RwLock<SharedState>>;
 #[derive(serde::Deserialize)]
 pub struct TaskQuery {
     pub count: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FrameQuery {
+    pub frame_id: Option<FrameId>,
 }
 
 #[get("/")]
@@ -86,20 +90,18 @@ async fn get_next_tasks(
 
     let worker_id = state.create_worker();
 
-    let tasks = frame_ids
-        .into_iter()
-        .map(|frame_id| state.add_task(frame_id, worker_id.clone()))
-        .collect::<Vec<WorkerTask>>();
+    let task = state.add_task(worker_id, &frame_ids);
 
     drop(state);
 
-    HttpResponse::Ok().body(serde_json::to_string(&tasks).unwrap())
+    HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
 }
 
 #[put("/tasks")]
 async fn submit_pending_task(
     req: HttpRequest,
     MultipartForm(form): MultipartForm<Frame>,
+    query: Query<FrameQuery>,
 ) -> impl Responder {
     let Some(worker_id) = req.headers().get(HEADER_WORKER_ID) else {
         return HttpResponse::new(StatusCode::UNAUTHORIZED);
@@ -111,20 +113,31 @@ async fn submit_pending_task(
 
     let mut state = state_lock.write().unwrap();
 
-    let Some(worker_task) = state.pending_tasks.remove(worker_id) else {
+    let Some(frame_id) = query
+        .frame_id
+        .or(state.get_pending_frame_id(worker_id.to_string()))
+    else {
+        return HttpResponse::new(StatusCode::BAD_REQUEST);
+    };
+
+    let Some(worker_task) = state.pending_tasks.get_mut(worker_id) else {
         return HttpResponse::new(StatusCode::NOT_FOUND);
     };
 
-    let file_name =
-        format!("{}/{}", state.output_directory, worker_task.frame_id);
+    if !worker_task.frames.remove(&frame_id) {
+        return HttpResponse::new(StatusCode::NOT_FOUND);
+    }
+
+    let file_name = format!("{}/{}", state.output_directory, frame_id);
 
     drop(state);
 
-    match form.frame.file. persist(file_name) {
+    match form.frame.file.persist(file_name) {
         Ok(_) => {
             let mut state = state_lock.write().unwrap();
+
             if let Some(frame_id) = state.take_frame_id() {
-                let task = state.add_task(frame_id, worker_id.to_string());
+                let task = state.add_task(worker_id.to_string(), &[frame_id]);
 
                 HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
             } else {
@@ -164,8 +177,8 @@ async fn submit_heartbeat(req: HttpRequest) -> impl Responder {
 async fn main() -> std::io::Result<()> {
     env_logger::builder().init();
 
-    let output_directory =
-        parse_env!("OUT_DIRECTORY", String).unwrap_or("/tmp/frames".to_string());
+    let output_directory = parse_env!("OUT_DIRECTORY", String)
+        .unwrap_or("/tmp/frames".to_string());
 
     std::fs::create_dir_all(&output_directory)
         .expect("Failed to create output directory");
