@@ -1,0 +1,14 @@
+[Unit]
+Description=Blender Render Farm server 
+After=network.target
+
+[Service]
+WorkingDirectory=/home/au/render_farm
+ExecStart=/home/au/render_farm/blender_server
+Environment=RUST_LOG=info
+Environment=FRAMES_COUNT=12
+Environment=COMMAND=./run.sh
+Environment=SOURCE_FILE=shamyna.blend
+
+[Install]
+WantedBy=multi-user.target
