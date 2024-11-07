@@ -11,7 +11,10 @@ use std::{
 use actix_multipart::form::{tempfile::TempFile, MultipartForm};
 use actix_web::{
     get,
-    http::{header::HeaderName, StatusCode},
+    http::{
+        header::{ContentDisposition, ContentType, HeaderName},
+        StatusCode,
+    },
     post, put,
     web::Query,
     App, HttpRequest, HttpResponse, HttpServer, Responder,
@@ -28,6 +31,7 @@ pub type WorkerId = String;
 
 const LEASE_TIME: Duration = Duration::from_secs(1200);
 const HEADER_WORKER_ID: HeaderName = HeaderName::from_static("x-worker-id");
+const FRAMES_FILE_NAME: &str = "shamyna.blend";
 
 pub type StateLock = Arc<RwLock<SharedState>>;
 
@@ -51,7 +55,10 @@ async fn get_frames(req: HttpRequest) -> impl Responder {
         Arc::clone(&state.source_file)
     };
 
-    HttpResponse::Ok().body(Vec::clone(&file))
+    HttpResponse::Ok()
+        .content_type(ContentType::octet_stream())
+        .insert_header(ContentDisposition::attachment(FRAMES_FILE_NAME))
+        .body(Vec::clone(&file))
 }
 
 #[post("/tasks")]
@@ -171,11 +178,12 @@ async fn main() -> std::io::Result<()> {
     std::fs::create_dir_all(&output_directory)
         .expect("Failed to create output directory");
 
-    let script = parse_env!("COMMAND", String).unwrap_or("./run.sh".to_string());
+    let script =
+        parse_env!("COMMAND", String).unwrap_or("./run.sh".to_string());
 
     let source_file = {
         let file_path = parse_env!("SOURCE_FILE", String)
-            .unwrap_or("shamyna.blend".to_string());
+            .unwrap_or(FRAMES_FILE_NAME.to_string());
 
         std::fs::read(file_path).expect("Failed to load source file")
     };
