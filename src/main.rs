@@ -26,7 +26,6 @@ struct Frame {
     frame: TempFile,
 }
 
-pub type FrameId = u64;
 pub type WorkerId = String;
 
 const LEASE_TIME: Duration = Duration::from_secs(1200);
@@ -42,7 +41,7 @@ pub struct TaskQuery {
 
 #[derive(serde::Deserialize)]
 pub struct FrameQuery {
-    pub frame_id: Option<FrameId>,
+    pub frame_id: Option<u64>,
 }
 
 #[get("/frames")]
@@ -62,10 +61,7 @@ async fn get_frames(req: HttpRequest) -> impl Responder {
 }
 
 #[post("/tasks")]
-async fn get_next_tasks(
-    req: HttpRequest,
-    query: Query<TaskQuery>,
-) -> impl Responder {
+async fn get_next_tasks(req: HttpRequest, query: Query<TaskQuery>) -> impl Responder {
     let state_lock = req.app_data::<StateLock>().unwrap();
 
     let mut state = state_lock.write().unwrap();
@@ -73,7 +69,7 @@ async fn get_next_tasks(
     let task_count = query.count.unwrap_or(1);
     let frame_ids = (0..task_count)
         .flat_map(|_| state.take_frame_id())
-        .collect::<Vec<FrameId>>();
+        .collect::<Vec<u64>>();
 
     if frame_ids.is_empty() {
         //no task can be generated because all are already taken
@@ -156,34 +152,30 @@ async fn submit_heartbeat(req: HttpRequest) -> impl Responder {
 
     let mut state = state_lock.write().unwrap();
 
-    let Some(worker_task) = state.pending_tasks.get_mut(worker_id) else {
-        return HttpResponse::new(StatusCode::NOT_FOUND);
+    let ok = state.update_heart_beat(worker_id);
+
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
     };
-
-    worker_task.lease_time = SystemTime::now() + LEASE_TIME;
-
-    HttpResponse::new(StatusCode::OK)
+    HttpResponse::new(status)
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::builder().init();
 
-    let output_directory = parse_env!("OUT_DIRECTORY", String)
-        .unwrap_or("/tmp/frames".to_string());
+    let output_directory = parse_env!("OUT_DIRECTORY", String).unwrap_or("/tmp/frames".to_string());
 
-    std::fs::remove_dir_all(&output_directory)
-        .expect("Failed to clear output directory");
+    std::fs::remove_dir_all(&output_directory).expect("Failed to clear output directory");
 
-    std::fs::create_dir_all(&output_directory)
-        .expect("Failed to create output directory");
+    std::fs::create_dir_all(&output_directory).expect("Failed to create output directory");
 
-    let script =
-        parse_env!("COMMAND", String).unwrap_or("./run.sh".to_string());
+    let script = parse_env!("COMMAND", String).unwrap_or("./run.sh".to_string());
 
     let source_file = {
-        let file_path = parse_env!("SOURCE_FILE", String)
-            .unwrap_or(FRAMES_FILE_NAME.to_string());
+        let file_path = parse_env!("SOURCE_FILE", String).unwrap_or(FRAMES_FILE_NAME.to_string());
 
         std::fs::read(file_path).expect("Failed to load source file")
     };
@@ -248,7 +240,7 @@ async fn main() -> std::io::Result<()> {
             .service(submit_heartbeat)
             .app_data(Arc::clone(&state_lock))
     })
-    .bind(("0.0.0.0", 8080))?
-    .run()
-    .await
+        .bind(("0.0.0.0", 8080))?
+        .run()
+        .await
 }

@@ -1,21 +1,31 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc, time::SystemTime,
+    sync::Arc,
+    time::SystemTime,
 };
 
-use crate::{task::WorkerTask, FrameId, WorkerId, LEASE_TIME};
+use crate::{task::WorkerTask, WorkerId, LEASE_TIME};
 
 #[derive(Debug, Clone)]
 pub struct SharedState {
     pub source_file: Arc<Vec<u8>>,
-    pub frames: HashSet<FrameId>,
+    pub frames: HashSet<u64>,
     pub next_worker_id: u64,
     pub pending_tasks: HashMap<WorkerId, WorkerTask>,
     pub output_directory: String,
 }
 
 impl SharedState {
-    pub fn take_frame_id(&mut self) -> Option<FrameId> {
+    pub fn update_heart_beat(&mut self, worker_id: &str) -> bool {
+        let Some(worker_task) = self.pending_tasks.get_mut(worker_id) else {
+            return false;
+        };
+
+        worker_task.lease_time = SystemTime::now() + LEASE_TIME;
+        true
+    }
+
+    pub fn take_frame_id(&mut self) -> Option<u64> {
         let frame_id = self.frames.iter().next().cloned()?;
         let _ = self.frames.remove(&frame_id);
         Some(frame_id)
@@ -27,11 +37,7 @@ impl SharedState {
         worker_id
     }
 
-    pub fn add_task(
-        &mut self,
-        worker_id: WorkerId,
-        frame_ids: &[FrameId],
-    ) -> WorkerTask {
+    pub fn add_task(&mut self, worker_id: WorkerId, frame_ids: &[u64]) -> WorkerTask {
         self.pending_tasks
             .entry(worker_id.clone())
             .and_modify(|task| {
@@ -47,7 +53,7 @@ impl SharedState {
         WorkerTask::new(worker_id.clone(), frame_ids)
     }
 
-    pub fn get_pending_frame_id(&self, worker_id: WorkerId) -> Option<FrameId> {
+    pub fn get_pending_frame_id(&self, worker_id: WorkerId) -> Option<u64> {
         let task = self.pending_tasks.get(&worker_id)?;
 
         if task.frames.len() == 1 {
@@ -59,7 +65,7 @@ impl SharedState {
 
     //perform clean up old workers
     pub fn clean_up(&mut self) {
-        let mut purged_frames = Vec::<FrameId>::new();
+        let mut purged_frames = Vec::<u64>::new();
 
         self.pending_tasks.retain(|_id, state| {
             let is_alive = state.lease_time < SystemTime::now();
@@ -77,7 +83,9 @@ impl SharedState {
     // true if all frames are successfully generated
     // false if any frame is pending
     pub fn has_frames(&self) -> bool {
-        let has_no_pending = self.pending_tasks.values()
+        let has_no_pending = self
+            .pending_tasks
+            .values()
             .all(|task| task.frames.is_empty());
 
         !(self.frames.is_empty() && has_no_pending)
