@@ -4,6 +4,7 @@ pub mod task;
 
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Write},
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
@@ -88,7 +89,7 @@ async fn get_next_tasks(req: HttpRequest, query: Query<TaskQuery>) -> impl Respo
 #[put("/tasks")]
 async fn submit_pending_task(
     req: HttpRequest,
-    MultipartForm(form): MultipartForm<Frame>,
+    MultipartForm(mut form): MultipartForm<Frame>,
     query: Query<FrameQuery>,
 ) -> impl Responder {
     let Some(worker_id) = req.headers().get(HEADER_WORKER_ID) else {
@@ -105,39 +106,61 @@ async fn submit_pending_task(
         .frame_id
         .or(state.get_pending_frame_id(worker_id.to_string()))
     else {
+        println!("There's no pending frame for this worker");
         return HttpResponse::new(StatusCode::BAD_REQUEST);
     };
 
     let Some(worker_task) = state.pending_tasks.get_mut(worker_id) else {
+        dbg!(&state.pending_tasks);
+        println!("No pending tasks");
         return HttpResponse::new(StatusCode::NOT_FOUND);
     };
 
     if !worker_task.frames.remove(&frame_id) {
+        println!("Can't remove task lol");
         return HttpResponse::new(StatusCode::NOT_FOUND);
     }
 
-    let file_name = format!("{}/{}.png", state.output_directory, frame_id);
-
+    let file_name = format!("{}/{:0>5}.png", state.output_directory, frame_id);
     drop(state);
 
-    match form.frame.file.persist(file_name) {
-        Ok(_) => {
-            let mut state = state_lock.write().unwrap();
+    let mut file = std::fs::File::create(file_name).expect("Failed to create output file");
+    //form.frame.file.bytes();
+    std::io::copy(&mut form.frame.file, &mut file).expect("Failed to copy file to output");
+    //file.write_all(form.frame.file.read));
+    drop(file);
 
-            if let Some(frame_id) = state.take_frame_id() {
-                let task = state.add_task(worker_id.to_string(), &[frame_id]);
+    let mut state = state_lock.write().unwrap();
 
-                HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
-            } else {
-                HttpResponse::new(StatusCode::CONFLICT)
-            }
-        }
-        Err(cause) => {
-            log::warn!("Failed to save frame: {cause}");
-
-            HttpResponse::new(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+    if let Some(frame_id) = state.take_frame_id() {
+        let task = state.add_task(worker_id.to_string(), &[frame_id]);
+        dbg!(&state.pending_tasks);
+        println!("Gave away {frame_id}");
+        HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
+    } else {
+        HttpResponse::new(StatusCode::CONFLICT)
     }
+
+    // match form.frame.file.persist(file_name) {
+    //     Ok(_) => {
+    //         let mut state = state_lock.write().unwrap();
+    //
+    //         if let Some(frame_id) = state.take_frame_id() {
+    //             let task = state.add_task(worker_id.to_string(), &[frame_id]);
+    //             dbg!(&state.pending_tasks);
+    //             println!("Gave away {frame_id}");
+    //
+    //             HttpResponse::Ok().body(serde_json::to_string(&task).unwrap())
+    //         } else {
+    //             HttpResponse::new(StatusCode::CONFLICT)
+    //         }
+    //     }
+    //     Err(cause) => {
+    //         println!("WHY?? {cause:?}");
+    //         log::warn!("Failed to save frame: {cause}");
+    //         HttpResponse::new(StatusCode::INTERNAL_SERVER_ERROR)
+    //     }
+    // }
 }
 
 #[post("/workers/alive")]
@@ -168,7 +191,12 @@ async fn main() -> std::io::Result<()> {
 
     let output_directory = parse_env!("OUT_DIRECTORY", String).unwrap_or("/tmp/frames".to_string());
 
-    std::fs::remove_dir_all(&output_directory).expect("Failed to clear output directory");
+    let e = std::fs::remove_dir_all(&output_directory);
+    if let Err(e) = e {
+        println!("Error: {e}. Failed to clear output directory");
+    }
+
+    //.expect("Failed to clear output directory");
 
     std::fs::create_dir_all(&output_directory).expect("Failed to create output directory");
 
@@ -184,7 +212,7 @@ async fn main() -> std::io::Result<()> {
 
     assert!(frames_count > 0);
 
-    let frames = HashSet::from_iter(0..frames_count);
+    let frames = HashSet::from_iter(1..=frames_count);
 
     let state_lock = Arc::new(RwLock::new(SharedState {
         source_file: Arc::new(source_file),
@@ -201,7 +229,7 @@ async fn main() -> std::io::Result<()> {
 
             let mut state = state_lock_ref.write().unwrap();
 
-            state.clean_up();
+            //state.clean_up();
 
             let has_frames = state.has_frames();
 
@@ -234,11 +262,11 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            .app_data(state_lock.clone())
             .service(get_frames)
             .service(get_next_tasks)
             .service(submit_pending_task)
             .service(submit_heartbeat)
-            .app_data(Arc::clone(&state_lock))
     })
         .bind(("0.0.0.0", 8080))?
         .run()

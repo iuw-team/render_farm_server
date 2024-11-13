@@ -68,7 +68,7 @@ impl SharedState {
         let mut purged_frames = Vec::<u64>::new();
 
         self.pending_tasks.retain(|_id, state| {
-            let is_alive = state.lease_time < SystemTime::now();
+            let is_alive = state.lease_time > SystemTime::now();
 
             if !is_alive {
                 purged_frames.extend(state.frames.iter());
